@@ -4,7 +4,10 @@ Uses Tesseract OCR to extract text from plate images
 """
 
 import cv2
+import numpy as np
 import pytesseract
+import threading
+import signal
 from utils import enhance_plate_image, validate_plate_text
 from config import TESSERACT_CONFIG
 
@@ -14,21 +17,65 @@ class PlateOCR:
     OCR engine for extracting text from number plates
     """
     
-    def __init__(self, tesseract_path=None):
+    def __init__(self, tesseract_path=None, use_easyocr=True):
         """
         Initialize OCR engine
         
         Args:
             tesseract_path: Path to tesseract executable (Windows)
                           Set to None for Linux/Mac (auto-detected)
+            use_easyocr: Whether to attempt EasyOCR initialization (default: True)
         """
         # Set Tesseract path for Windows
         if tesseract_path:
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
         
-        # For Windows, if not specified, try common location
-        # Uncomment and set if needed:
-        # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        # Initialize EasyOCR reader (optional, with timeout)
+        self.reader = None
+        self.use_easyocr = use_easyocr
+        
+        if use_easyocr:
+            self._initialize_easyocr()
+    
+    def _initialize_easyocr(self):
+        """
+        Initialize EasyOCR Reader with timeout handling
+        """
+        try:
+            import easyocr
+            print("[INFO] Initializing EasyOCR Reader (this takes a moment)...")
+            
+            # Initialize in a thread with timeout
+            reader_holder = [None]
+            exception_holder = [None]
+            
+            def init_reader():
+                try:
+                    reader_holder[0] = easyocr.Reader(['en'], gpu=False, verbose=False)
+                except Exception as e:
+                    exception_holder[0] = e
+            
+            thread = threading.Thread(target=init_reader, daemon=True)
+            thread.start()
+            thread.join(timeout=120)  # 2-minute timeout
+            
+            if exception_holder[0]:
+                raise exception_holder[0]
+            
+            if reader_holder[0] is None:
+                print("[WARNING] EasyOCR initialization timed out (>120 seconds). Using Tesseract only.")
+                self.reader = None
+            else:
+                self.reader = reader_holder[0]
+                print("[INFO] EasyOCR Reader initialized successfully")
+                
+        except ImportError:
+            print("[WARNING] EasyOCR not installed. Install with: pip install easyocr")
+            self.reader = None
+        except Exception as e:
+            print(f"[WARNING] EasyOCR initialization failed: {e}")
+            print("[WARNING] Falling back to Tesseract OCR only")
+            self.reader = None
     
     def extract_text(self, plate_img):
         """
@@ -171,10 +218,9 @@ class PlateOCR:
         Use EasyOCR (Deep Learning) - Much better accuracy
         """
         try:
-            import easyocr
-            if not hasattr(self, 'reader'):
-                print("[INFO] Initializing EasyOCR Reader (this takes a moment)...")
-                self.reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+            if self.reader is None:
+                # EasyOCR not available, fall back to Tesseract
+                return self.extract_text(plate_img)
             
             results = self.reader.readtext(plate_img)
             
@@ -196,11 +242,6 @@ class PlateOCR:
                 
             return cleaned, is_valid, max_conf * 100
             
-        except ImportError:
-            print("[ERROR] EasyOCR not installed. Falling back to Tesseract.")
-            return self.extract_text(plate_img)
         except Exception as e:
-            print(f"[ERROR] EasyOCR failed: {e}")
-            return "", False, 0.0
-
-import numpy as np
+            print(f"[WARNING] EasyOCR extraction failed: {e}")
+            return self.extract_text(plate_img)
